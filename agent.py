@@ -3,6 +3,7 @@ and writes a fun, newsletter-style summary."""
 
 from dotenv import load_dotenv
 load_dotenv()
+import html
 import json
 import random
 import re
@@ -130,7 +131,7 @@ def _is_image(url: str) -> bool:
 
 
 def _strip_html(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text)).strip()
+    return html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text))).strip()
 
 
 def search_commons(query: str) -> list[dict]:
@@ -155,9 +156,12 @@ def search_commons(query: str) -> list[dict]:
         meta = info.get("extmetadata", {})
         # Drop the "?utm_source=..." tracking suffix so the url is short and easy to copy exactly.
         url = (info.get("thumburl") or info.get("url") or "").split("?")[0]
-        if not url:
+        # Outlook and some other email clients can't display WebP.
+        if not url or url.lower().endswith(".webp"):
             continue
         artist = _strip_html(meta.get("Artist", {}).get("value", ""))
+        if len(artist) > 80:
+            artist = artist[:77].rstrip(" ,.") + "..."
         license_name = meta.get("LicenseShortName", {}).get("value", "")
         results.append({
             "url": url,

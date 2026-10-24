@@ -1,18 +1,19 @@
-import html
 import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, status
-from typing import Dict, Optional
+from fastapi.responses import HTMLResponse
+from typing import Dict
 from pydantic import BaseModel, Field
 import anthropic
-import markdown
 import resend
 import random
 
 load_dotenv()
 
 from agent import find_image, research_topic
+from market_data import MarketDataError, get_biggest_mover
+from newsletter_template import render_newsletter
 
 app = FastAPI(title="Simple Items API", version="1.0.0")
 resend.api_key = os.environ["RESEND_API_KEY"]
@@ -549,26 +550,31 @@ def generate_segment() -> dict:
     return {"category": category, "summary": summary, "image": find_image(category, summary)}
 
 
-def render_email_html(summary: str, image: Optional[dict]) -> str:
-    """Convert the Markdown story to HTML, placing the picture right under the title."""
-    body = markdown.markdown(summary)
-    if image is None:
-        return body
-    figure = (
-        f'<p><img src="{html.escape(image["url"])}" alt="{html.escape(image["caption"])}" '
-        f'style="max-width:100%;height:auto;border-radius:8px;"></p>'
-        f'<p style="font-size:12px;color:#666;margin-top:-8px;">{html.escape(image["caption"])}'
-        f'{" — " + html.escape(image["credit"]) if image["credit"] else ""}</p>'
-    )
-    # Insert after the first heading; if there isn't one, put the picture at the top.
-    if "</h1>" in body:
-        return body.replace("</h1>", "</h1>" + figure, 1)
-    return figure + body
+@app.get("/mover")
+def biggest_mover() -> dict:
+    """The previous trading day's biggest stock move among companies worth $2B+
+    (no penny stocks, warrants, ETFs or funds). `candidates` lists the top 5 that
+    passed, so the newsletter can later pick the one with the clearest news story."""
+    try:
+        as_of, mover, candidates = get_biggest_mover()
+    except MarketDataError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    if mover is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No movers passed the filters for the latest trading day")
+    return {"as_of": as_of, "mover": mover, "candidates": candidates}
 
 
 @app.get("/topic")
 def random_topic() -> dict:
     return generate_segment()
+
+
+@app.get("/preview", response_class=HTMLResponse)
+def preview_newsletter() -> str:
+    """Generate a full issue and show it in the browser instead of emailing it."""
+    segment = generate_segment()
+    return render_newsletter(segment["category"], segment["summary"], segment["image"])
 
 
 @app.post("/")
@@ -580,7 +586,7 @@ def send_mail() -> Dict:
         "from": "Acme <onboarding@resend.dev>",
         "to": ["azamjb123@gmail.com"],
         "subject": title or f"Today's topic: {segment['category']}",
-        "html": render_email_html(segment["summary"], segment["image"]),
+        "html": render_newsletter(segment["category"], segment["summary"], segment["image"]),
     }
     email: resend.Emails.SendResponse = resend.Emails.send(params)
     return {"category": segment["category"], "subject": params["subject"], "email": email}
