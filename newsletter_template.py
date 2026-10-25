@@ -15,8 +15,9 @@ from typing import Optional
 
 import markdown
 
-NEWSLETTER_NAME = "The Curiosity Dispatch"
-TAGLINE = "One random rabbit hole, delivered to your inbox."
+NEWSLETTER_NAME = "Why It Moved"
+TAGLINE = "One big stock move a day, and what it teaches about markets."
+DISCLAIMER = "For learning only, not financial advice. Nothing here is a recommendation to buy or sell."
 
 # Each issue gets a color theme, chosen from the category so the same category
 # always looks the same. "deep" is dark enough for white text and for text on "tint".
@@ -37,9 +38,29 @@ SERIF = "Georgia, 'Times New Roman', Times, serif"
 SANS = "-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
 
 
-def pick_theme(category: str) -> dict:
+UP_COLOR = "#0F8A5F"    # green for gains
+DOWN_COLOR = "#C0392B"  # red for losses
+
+
+def pick_theme(category: str, direction: Optional[str] = None) -> dict:
+    """Teal for a stock that rose, coral for one that fell; otherwise one picked
+    from the category, so the same category always gets the same colors."""
+    if direction in ("up", "down"):
+        return next(t for t in THEMES if t["name"] == ("teal" if direction == "up" else "coral"))
     index = int(hashlib.md5(category.encode()).hexdigest(), 16) % len(THEMES)
     return THEMES[index]
+
+
+def _money(n: Optional[float]) -> str:
+    if n is None:
+        return "–"
+    if n >= 1e12:
+        return f"${n / 1e12:.2f}T"
+    if n >= 1e9:
+        return f"${n / 1e9:.1f}B"
+    if n >= 1e6:
+        return f"${n / 1e6:.0f}M"
+    return f"${n:,.2f}"
 
 
 def _styled(fragment: str, theme: dict, size: int = 16, color: str = TEXT) -> str:
@@ -47,8 +68,8 @@ def _styled(fragment: str, theme: dict, size: int = 16, color: str = TEXT) -> st
     p = f"margin:0 0 16px;font-family:{SANS};font-size:{size}px;line-height:1.65;color:{color};"
     rules = {
         "<p>": f'<p style="{p}">',
-        "<ul>": f'<ul style="margin:0 0 16px;padding-left:22px;">',
-        "<ol>": f'<ol style="margin:0 0 16px;padding-left:22px;">',
+        "<ul>": '<ul style="margin:0 0 16px;padding-left:22px;">',
+        "<ol>": '<ol style="margin:0 0 16px;padding-left:22px;">',
         "<li>": f'<li style="{p}margin:0 0 6px;">',
         "<h2>": f'<h2 style="margin:28px 0 10px;font-family:{SERIF};font-size:22px;line-height:1.3;color:{INK};">',
         "<h3>": f'<h3 style="margin:24px 0 8px;font-family:{SERIF};font-size:19px;line-height:1.3;color:{INK};">',
@@ -83,9 +104,17 @@ def parse_story(summary: str) -> dict:
     title = lines.pop(0).lstrip("#").strip() if lines and lines[0].startswith("#") else ""
     blocks = [b.strip() for b in re.split(r"\n\s*\n", "\n".join(lines)) if b.strip()]
 
-    hook, body, fun_fact, sources = "", [], "", []
+    hook, body, sources = "", [], []
+    callouts = {"the lesson": ""}  # sections shown in their own box
     in_sources = False
+    callout_waiting = None  # a callout heading on its own; its text is the next block
+    lesson_at = None  # how many body blocks came before the lesson
     for block in blocks:
+        if callout_waiting:
+            callouts[callout_waiting] = block
+            callout_waiting = None
+            continue
+
         first_word = re.sub(r"^[^\w]+", "", block).lower()  # ignore leading #, *, emoji
         if first_word.startswith("source"):
             in_sources = True
@@ -95,14 +124,23 @@ def parse_story(summary: str) -> dict:
                 item = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
                 if item:
                     sources.append(item)
-        elif first_word.startswith("fun fact"):
-            fun_fact = _strip_label(block, "fun fact")
+            continue
+
+        label = next((name for name in callouts if first_word.startswith(name)), None)
+        if label == "the lesson":
+            lesson_at = len(body)
+        if label:
+            text = _strip_label(block, label)
+            if text:
+                callouts[label] = text
+            else:
+                callout_waiting = label
         elif not hook and not body and not block.startswith(("#", "-", "*", "1.")):
             hook = block
         else:
             body.append(block)
 
-    return {"title": title, "hook": hook, "body": body, "fun_fact": fun_fact, "sources": sources}
+    return {"title": title, "hook": hook, "body": body, "lesson": callouts["the lesson"], "lesson_at": lesson_at, "sources": sources}
 
 
 def _plain(text: str) -> str:
@@ -111,10 +149,97 @@ def _plain(text: str) -> str:
     return re.sub(r"[*_`#>]", "", text).strip()
 
 
+def _stat_cell(label: str, value: str, detail: str, value_color: str = INK) -> str:
+    return f"""
+            <td width="50%" valign="top" style="padding:6px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+                <td bgcolor="#FAF8F3" style="background:#FAF8F3;border:1px solid #ECE7DC;border-radius:12px;padding:14px 16px;">
+                  <p style="margin:0;font-family:{SANS};font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:{MUTED};">{label}</p>
+                  <p style="margin:6px 0 0;font-family:{SANS};font-size:22px;line-height:1.2;font-weight:700;color:{value_color};">{value}</p>
+                  <p style="margin:4px 0 0;font-family:{SANS};font-size:12px;line-height:1.4;color:{MUTED};">{detail}</p>
+                </td>
+              </tr></table>
+            </td>"""
+
+
+def _stats_grid(stock: dict) -> str:
+    """2x2 grid of the move's key numbers. These come straight from the market data,
+    never from the AI-written story."""
+    up = stock["direction"] == "up"
+    arrow, color = ("&#9650;", UP_COLOR) if up else ("&#9660;", DOWN_COLOR)
+    volume_ratio = stock.get("volume_vs_average")
+    shares = stock.get("volume") or 0
+    cells = [
+        _stat_cell("Closing price", f"${stock['price']:,.2f}", f"from ${stock['previous_close']:,.2f}"),
+        _stat_cell("One-day move", f"{arrow} {abs(stock['change_percent']):.1f}%",
+                   f"{'+' if up else '&minus;'}${abs(stock['change_amount']):,.2f} a share", color),
+        _stat_cell("Company size", _money(stock.get("market_cap")), "market value"),
+        _stat_cell("Trading volume", f"{volume_ratio}&times;" if volume_ratio else f"{shares / 1e6:.1f}M",
+                   f"normal volume ({shares / 1e6:.1f}M shares)" if volume_ratio else "shares traded"),
+    ]
+    return f"""
+      <tr><td class="px" style="padding:22px 34px 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>{cells[0]}{cells[1]}</tr>
+          <tr>{cells[2]}{cells[3]}</tr>
+        </table>
+      </td></tr>"""
+
+
+def _also_moving(stock: dict, others: list[dict], pick_reason: Optional[str], theme: dict) -> str:
+    """The other big movers that were considered, plus why today's stock was picked."""
+    esc = html.escape
+    rows = ""
+    for o in others:
+        up = o["direction"] == "up"
+        arrow, color = ("&#9650;", UP_COLOR) if up else ("&#9660;", DOWN_COLOR)
+        rows += f"""
+          <tr>
+            <td style="padding:8px 0;border-top:1px solid #ECE7DC;font-family:{SANS};font-size:14px;color:{INK};">
+              <strong style="color:{INK};">{esc(o['ticker'])}</strong>
+              <span style="color:{MUTED};">&nbsp;{esc(o.get('company_name') or '')}</span>
+            </td>
+            <td align="right" style="padding:8px 0;border-top:1px solid #ECE7DC;font-family:{SANS};font-size:14px;font-weight:700;color:{color};white-space:nowrap;">
+              {arrow} {abs(o['change_percent']):.1f}%
+            </td>
+          </tr>"""
+    reason = ""
+    if pick_reason:
+        reason = (f'<p style="margin:0 0 12px;font-family:{SANS};font-size:14px;line-height:1.55;color:{TEXT};">'
+                  f'<strong style="color:{INK};">Why {esc(stock["ticker"])} today:</strong> {esc(pick_reason)}</p>')
+    return f"""
+      <tr><td class="px" style="padding:28px 40px 0;">
+        <p style="margin:0 0 10px;font-family:{SANS};font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{theme['deep']};">Also on the move</p>
+        {reason}
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{rows}
+        </table>
+      </td></tr>"""
+
+
+def _callout(icon: str, label: str, text: str, theme: dict, border_style: str) -> str:
+    """A highlighted box, used for 'The lesson'."""
+    return f"""
+      <tr><td class="px" style="padding:12px 40px 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td bgcolor="{theme['tint']}" style="background:{theme['tint']};border-radius:14px;padding:22px 24px;border:2px {border_style} {theme['accent']};">
+            <p style="margin:0 0 8px;font-family:{SANS};font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{theme['deep']};">{icon}&nbsp; {label}</p>
+            {_styled(_md(text), theme, size=17, color=INK).replace('margin:0 0 16px', 'margin:0')}
+          </td>
+        </tr></table>
+      </td></tr>"""
+
+
 def render_newsletter(category: str, summary: str, image: Optional[dict],
-                      issue_date: Optional[datetime.date] = None) -> str:
-    """Return the complete HTML email for one issue."""
-    theme = pick_theme(category)
+                      issue_date: Optional[datetime.date] = None,
+                      stock: Optional[dict] = None,
+                      others: Optional[list[dict]] = None,
+                      pick_reason: Optional[str] = None) -> str:
+    """Return the complete HTML email for one issue.
+
+    `category` is the label in the pill (e.g. "LKQ · Auto - Parts"). Pass `stock`
+    (a mover from market_data) to show its logo, the numbers grid and red/green colors.
+    `others` are the other movers considered and `pick_reason` why `stock` was chosen."""
+    theme = pick_theme(category, stock["direction"] if stock else None)
     story = parse_story(summary)
     d = issue_date or datetime.date.today()
     date_label = f"{d:%A}, {d:%B} {d.day}, {d.year}"
@@ -123,10 +248,17 @@ def render_newsletter(category: str, summary: str, image: Optional[dict],
 
     sections = []
 
-    # Category pill + title + hook
+    # Logo + category pill + title + hook
+    logo_cell = ""
+    if stock and stock.get("logo_url"):
+        logo_cell = f"""
+          <td style="padding-right:12px;">
+            <img src="{esc(stock['logo_url'])}" alt="{esc(stock.get('company_name') or '')} logo" width="40" height="40"
+                 style="display:block;width:40px;height:40px;border:1px solid #ECE7DC;border-radius:10px;background:#FFFFFF;">
+          </td>"""
     sections.append(f"""
       <tr><td class="px" style="padding:32px 40px 0;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>{logo_cell}
           <td bgcolor="{theme['tint']}" style="background:{theme['tint']};border-radius:999px;padding:7px 16px;font-family:{SANS};font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{theme['deep']};">
             &#9679;&nbsp; {esc(category)}
           </td>
@@ -145,6 +277,9 @@ def render_newsletter(category: str, summary: str, image: Optional[dict],
         </tr></table>
       </td></tr>""")
 
+    if stock:
+        sections.append(_stats_grid(stock))
+
     if image:
         caption = esc(image.get("caption", ""))
         credit = esc(image.get("credit", ""))
@@ -157,21 +292,18 @@ def render_newsletter(category: str, summary: str, image: Optional[dict],
         </p>
       </td></tr>""")
 
-    if story["body"]:
-        body_html = "".join(_styled(_md(b), theme) for b in story["body"])
-        sections.append(f"""
-      <tr><td class="px" style="padding:28px 40px 0;">{body_html}</td></tr>""")
+    # Body, with the lesson box placed where it appeared in the story.
+    split = story["lesson_at"] if story["lesson_at"] is not None else len(story["body"])
+    for i, blocks in enumerate((story["body"][:split], story["body"][split:])):
+        if blocks:
+            body_html = "".join(_styled(_md(b), theme) for b in blocks)
+            sections.append(f"""
+      <tr><td class="px" style="padding:{28 if i == 0 else 20}px 40px 0;">{body_html}</td></tr>""")
+        if i == 0 and story["lesson"]:
+            sections.append(_callout("&#127891;", "The lesson", story["lesson"], theme, "solid"))
 
-    if story["fun_fact"]:
-        sections.append(f"""
-      <tr><td class="px" style="padding:12px 40px 0;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-          <td bgcolor="{theme['tint']}" style="background:{theme['tint']};border-radius:14px;padding:22px 24px;border:2px dashed {theme['accent']};">
-            <p style="margin:0 0 8px;font-family:{SANS};font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{theme['deep']};">&#128161;&nbsp; Fun fact</p>
-            {_styled(_md(story['fun_fact']), theme, size=17, color=INK).replace('margin:0 0 16px', 'margin:0')}
-          </td>
-        </tr></table>
-      </td></tr>""")
+    if stock and others:
+        sections.append(_also_moving(stock, others, pick_reason, theme))
 
     if story["sources"]:
         items = "".join(
@@ -243,6 +375,7 @@ def render_newsletter(category: str, summary: str, image: Optional[dict],
           <p style="margin:8px 0 0;font-family:{SANS};font-size:13px;line-height:1.5;color:#B8B9D0;">
             Researched and written by an AI agent. Stay curious &#10024;
           </p>
+          <p style="margin:10px 0 0;font-family:{SANS};font-size:11px;line-height:1.5;color:#8C8DA8;">{esc(DISCLAIMER)}</p>
         </td></tr>
 
       </table>
@@ -254,27 +387,32 @@ def render_newsletter(category: str, summary: str, image: Optional[dict],
 
 
 if __name__ == "__main__":
-    sample = """# The Tiny Tank That Survived Space
+    # Sample issue about a made-up company, for checking the design without API calls.
+    sample = """# Acme Robotics Drops 18% After Cutting Its Forecast
 
-Meet the eight-legged, half-millimetre beast that laughs at boiling water, deep freezes and the vacuum of space.
+Record sales weren't enough: investors only cared about what Acme said comes next.
 
-Tardigrades, also called **water bears**, live almost everywhere: moss on your roof, Antarctic ice, deep-sea mud. Under a microscope they look like chubby gummy bears with claws.
+## What happened
+Acme Robotics reported quarterly revenue of $2.1 billion, slightly above what analysts expected. But it also lowered its **guidance** (the company's own forecast for future sales) for next year, blaming slower orders from car makers.
 
-Their party trick is *cryptobiosis*. When things get rough they dry out, curl into a "tun" and drop their metabolism to almost nothing, staying like that for years.
+## Why the market cared
+A stock price reflects what investors expect a company to earn in the *future*, not what it earned last quarter. A beat on old numbers matters less than a cut to the forecast, because the forecast is what changes the estimate of future profits.
 
-In 2007 the European Space Agency strapped a batch to the outside of a satellite. Most came back alive, making them the first animals known to survive open space.
+## The lesson
+Markets look forward. A company can beat expectations and still fall if it lowers its outlook, because guidance resets what investors think the next few years look like.
 
-**Fun fact:** Some tardigrades make a protein called Dsup that shields their DNA from radiation, and scientists have added it to human cells in the lab.
+## What to watch next
+Whether other robotics suppliers report the same slowdown, and Acme's investor day in March.
 
 ## Sources
-- [Tardigrade – Wikipedia](https://en.wikipedia.org/wiki/Tardigrade)
-- https://www.esa.int/Science_Exploration/Human_and_Robotic_Exploration/Research/Tardigrades
+- https://www.example.com/acme-earnings
+- [Acme Q3 results (example)](https://www.example.com/acme-q3)
 """
-    image = {
-        "url": "https://upload.wikimedia.org/wikipedia/commons/6/65/Hypsibiusdujardini.jpg",
-        "caption": "A water bear (Hypsibius dujardini) under the microscope.",
-        "credit": "Willow Gabriel, Goldstein Lab, CC BY-SA 2.5 via Wikimedia Commons",
+    stock = {
+        "ticker": "ACME", "company_name": "Acme Robotics", "price": 41.20, "previous_close": 50.24,
+        "change_amount": -9.04, "change_percent": -18.0, "direction": "down",
+        "market_cap": 8_400_000_000, "volume": 21_300_000, "volume_vs_average": 5.6, "logo_url": None,
     }
     with open("preview.html", "w", encoding="utf-8") as f:
-        f.write(render_newsletter("Tardigrades", sample, image))
+        f.write(render_newsletter("ACME · Industrial Machinery", sample, None, stock=stock))
     print("Wrote preview.html")
