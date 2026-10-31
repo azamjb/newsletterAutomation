@@ -37,9 +37,10 @@ def health_check() -> dict[str, str]:
 
 @app.get("/mover")
 def biggest_mover() -> dict:
-    """The previous trading day's biggest stock move among companies worth $2B+
-    (no penny stocks, warrants, ETFs or funds). `candidates` lists the top 5 that
-    passed, so the newsletter can later pick the one with the clearest news story."""
+    """The previous trading day's biggest stock moves among companies worth $10B+,
+    falling back to $5B+ and then $2B+ on days with none. Penny stocks, warrants,
+    ETFs and funds are excluded. `candidates` lists up to 5 that passed, so the
+    newsletter can pick the one with the clearest news story."""
     try:
         as_of, mover, candidates = get_biggest_mover()
     except MarketDataError as e:

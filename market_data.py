@@ -24,7 +24,9 @@ API_URL = "https://financialmodelingprep.com/stable/"
 # ETFs. These filters keep companies big enough that readers may know them and
 # that their moves usually have a real news story behind them.
 MIN_PRICE = 5.0
-MIN_MARKET_CAP = 2_000_000_000
+# Minimum company size, tried in order: large, well-known companies first, and
+# smaller ones only on days when no large company made the movers lists.
+MARKET_CAP_TIERS = [10_000_000_000, 5_000_000_000, 2_000_000_000]
 TOP_N = 5                # how many qualifying companies to return
 MAX_PROFILE_LOOKUPS = 30  # caps API usage (one call per company checked)
 
@@ -117,22 +119,29 @@ def get_candidates() -> list[dict]:
     movers = [m for m in movers if m["price"] >= MIN_PRICE and _is_common_stock(m["symbol"])]
     movers.sort(key=lambda m: abs(m["changesPercentage"]), reverse=True)
 
-    candidates = []
+    # Look up every shortlisted mover (not just until TOP_N are found), since a
+    # large company further down the list takes priority over smaller ones.
+    qualifying = []
     for mover in movers[:MAX_PROFILE_LOOKUPS]:
         profiles = _get("profile", symbol=mover["symbol"])
         if not profiles:
             continue
         profile = profiles[0]
         if (
-            (profile.get("marketCap") or 0) >= MIN_MARKET_CAP
+            (profile.get("marketCap") or 0) >= MARKET_CAP_TIERS[-1]
             and not profile.get("isEtf")
             and not profile.get("isFund")
             and profile.get("isActivelyTrading", True)
         ):
-            candidates.append(_build_candidate(mover, profile))
-            if len(candidates) == TOP_N:
-                break
-    return candidates
+            qualifying.append(_build_candidate(mover, profile))
+
+    for min_cap in MARKET_CAP_TIERS:
+        tier = [c for c in qualifying if c["market_cap"] >= min_cap]
+        if tier:
+            if min_cap != MARKET_CAP_TIERS[0]:
+                print(f"No movers worth ${MARKET_CAP_TIERS[0] / 1e9:.0f}B+; using ${min_cap / 1e9:.0f}B+")
+            return tier[:TOP_N]
+    return []
 
 
 def latest_trading_day() -> str:
